@@ -24,4 +24,4 @@ ui/dist-demo/
 .qdrant-win/
 # agent / session state, not project code
 .commandcode/
-.claudecode/
+.claude/
