@@ -21,7 +21,7 @@ Hosted demo: see the end of this file.
 | Qwen3-Embedding-4B | Same family, higher quality but heavier; a drop-in upgrade (`EMBED_MODEL=qwen3-embedding:4b`) when the hardware allows |
 | BGE-M3 | Its edge is dense + sparse + multi-vector in one model, but Ollama exposes only the dense half |
 | EmbeddingGemma | 2,048-token input limit: too short for a Java class or a PRD section; Gemma licence |
-| nomic-embed-text (chapter 10) | Older generation, weaker on code |
+| nomic-embed-text | Older generation, weaker on code |
 
 Settings: `qwen3-embedding:0.6b`, **1024 dims** (the model's native width; Matryoshka
 truncation via Ollama's `dimensions` parameter), queries prefixed with a task instruction.
@@ -43,7 +43,7 @@ The rule: **chunk along the unit a QA engineer asks about**, never by character 
 
 | Source | Chunk unit | Target size | Overlap | Why |
 |---|---|---|---|---|
-| Test cases (CSV/XLSX) | one row | ~190 tokens | none | A test case is already atomic; splitting glues half of one case to the next (chapter 11) |
+| Test cases (CSV/XLSX) | one row | ~190 tokens | none | A test case is already atomic; splitting glues half of one case to the next |
 | + inventory chunks | 1 repository summary + 1 per module | ≤ 800 tokens | none | "Which features have **no** test cases?" asks about absence; top-k cannot prove absence |
 | Jira tickets | summary + description; each comment separately | ≤ 500 tokens | 1 paragraph, only if split | Comments carry the root cause; they must be retrievable on their own |
 | PRD / SRS / BRD / FRD, company docs (PDF/MD) | heading-aware section | 500 target, 700 max | ~15% (one block) when a section is split | Answers live in a section; tiny sibling sections are merged |
@@ -76,6 +76,78 @@ The rule: **chunk along the unit a QA engineer asks about**, never by character 
   page, symbols, line numbers, build, failed and flaky tests: all filterable in Qdrant.
 
 ### 5. Architecture
+
+This is a hybrid Retrieval-Augmented Generation system that combines multiple retrieval methods to answer QA-related questions across diverse knowledge sources.
+
+Core Retrieval Pipeline
+
+1. Dense Embeddings (qabuddy/embed.py):
+   - Qwen3-Embedding model via Ollama (1024-dimensional vectors)
+   - Instruction-aware query encoding: "Instruct: ...\nQuery: {question}"
+   - Used for semantic meaning matching
+2. Sparse BM25 (qabuddy/sparse.py):
+   - Code-aware tokenizer that preserves identifiers, ticket IDs (VWO-26), file names
+   - Light stemmer consistent with browser demo (ui/src/bm25.js)
+   - TF-IDF weighted, hashed to uint32 indices
+   - Handles camelCase, dotted paths, and technical identifiers
+3. RRF Fusion (qabuddy/store.py):
+   - Qdrant's Reciprocal Rank Fusion combines dense and sparse results
+   - Single batched query with three query types: dense-only, sparse-only, fused RRF
+4. Cross-Encoder Reranking (qabuddy/rerank.py):
+   - sentence-transformers.CrossEncoder for precision
+   - Runs question+candidate together for better relevance judgment
+   - Default: cross-encoder/ms-marco-MiniLM-L-6-v2
+5. Exact ID Lookup (qabuddy/store.py):
+   - Direct fetch of JIRA keys (VWO-26, LOGIN-002) and test case IDs
+   - Bypasses search for known identifiers
+
+Data Ingestion Pipeline
+
+From qabuddy/ingest.py:
+- Sources defined in sources.yaml (8 kinds: testcases, jira, docs, transcript, diagram, logs, code, figma)
+- Chunks per kind using appropriate chunker:
+  - Code (Java/TS/JS): AST-aware splitting by methods/classes/scopes
+  - Docs (PDF/MD): Heading-aware section chunking with merge/split logic
+  - Jira: Ticket body + per-comment chunks
+  - Testcases: CSV/XLSX row-based
+  - Logs: Failure windows, build summaries, flaky test detection
+  - Transcripts: Speaker turns with overlap
+  - Diagrams: Shape/edge data from Lucid exports
+- Incremental indexing: SHA256 manifest tracks changes; only re-indexes modified files
+- Vector storage: Qdrant with dense (1024D cosine) + sparse (BM25 with IDF) vectors
+
+Answer Generation
+
+qabuddy/answer.py:
+- Modes: ask, rca, test_design, triage, code, rtm - each with source quotas and instructions
+- Citation rules: Inline [1], [2][3] format only; no 【】 or line ranges
+- Token budgeting: Water-filling algorithm across sources
+- LLM: Groq by default, pluggable (Ollama, OpenAI)
+- Rewrite: Conversation follow-ups converted to standalone search queries
+
+Key Design Decisions
+
+┌──────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────┐
+│       Feature        │                                    Why it matters for QA                                     │
+├──────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Code-aware BM25      │ QA questions use identifiers (TimeoutException, WaitHelpers.java) that prose tokenizers miss │
+├──────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Exact ID lookup      │ Engineers constantly reference VWO-26, LOGIN-002 etc. - must fetch directly                  │
+├──────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Per-source quotas    │ Prevent 500 test case rows from crowding out a single PRD section                            │
+├──────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Water-filling tokens │ Long docs get proportionally more context; short docs keep full length                       │
+├──────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Modes with quotas    │ RCA needs both jenkins + jira + meeting_notes; RTM needs requirements + test_cases           │
+└──────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────┘
+
+Evaluation
+
+- 38 test cases in eval/golden.yaml covering citation counting, tokenizer agreement, JIRA parsing, doc chunking, log analysis, code chunking, transcripts
+- Runs headless: pytest -q (no Qdrant/Ollama/LLM needed)
+
+The system is well-engineered for the QA domain, carefully balancing recall (hybrid BM25 + dense) with precision (cross-encoder reranking), and paying special attention to the identifier-heavy language QA engineers use in their daily work.
+
 
 ```mermaid
 flowchart LR

@@ -359,3 +359,16 @@ It requires bash, `curl`, and network access to download the Qdrant binary into 
 
 `deploy/docker-compose.yml` runs Ollama + the app + Caddy (HTTPS + team login) in
 containers, against your external Qdrant (local or Cloud). See [`deploy/DEPLOY.md`](deploy/DEPLOY.md) for droplet sizing and the walkthrough.
+
+## Command Code comments
+
+To run it yourself next time, from C:\PramodAcademy\QABuddy:
+
+python -m qabuddy serve
+
+That's all that's needed, because on this machine everything else is already set up:
+
+Ollama is running with qwen3-embedding:0.6b pulled
+.env points at Qdrant Cloud (838 chunks already indexed) and has a GROQ_API_KEY
+ui/dist is already built (the Python server serves API + UI on one port)
+PORT=8300 in .env is what drives the port. If you ever change data/, re-index first with python -m qabuddy ingest. I left the server running as background task s0zy8v30; stop it with kill_shell taskId="s0zy8v30" (or Ctrl+C if you launch it in a terminal).
